@@ -51,6 +51,8 @@ FlutterEngineDisplayId fl_display_monitor_get_display_id(
     FlDisplayMonitor* monitor,
     GdkMonitor* gdk_monitor);
 
+uint64_t fl_display_monitor_calculate_frame_interval(FlDisplayMonitor* self);
+
 G_END_DECLS
 
 #endif  // FLUTTER_SHELL_PLATFORM_LINUX_FL_DISPLAY_MONITOR_H_

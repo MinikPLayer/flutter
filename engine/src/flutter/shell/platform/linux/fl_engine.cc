@@ -8,6 +8,7 @@
 #include <gmodule.h>
 
 #include <cstring>
+#include <chrono>
 
 #include "flutter/common/constants.h"
 #include "flutter/shell/platform/common/engine_switches.h"
@@ -27,6 +28,7 @@
 #include "flutter/shell/platform/linux/fl_texture_gl_private.h"
 #include "flutter/shell/platform/linux/fl_texture_registrar_private.h"
 #include "flutter/shell/platform/linux/public/flutter_linux/fl_plugin_registry.h"
+#include "flutter/shell/platform/linux/fl_display_monitor.h"
 
 // Unique number associated with platform tasks.
 static constexpr size_t kPlatformTaskRunnerIdentifier = 1;
@@ -723,6 +725,34 @@ FlDisplayMonitor* fl_engine_get_display_monitor(FlEngine* self) {
   return self->display_monitor;
 }
 
+static std::chrono::nanoseconds SnapToNextTick(
+    std::chrono::nanoseconds value,
+    std::chrono::nanoseconds tick_phase,
+    std::chrono::nanoseconds tick_interval) {
+  std::chrono::nanoseconds offset = (tick_phase - value) % tick_interval;
+  if (offset != std::chrono::nanoseconds::zero()) {
+    offset = offset + tick_interval;
+  }
+  return value + offset;
+}
+
+static void fl_engine_vsync_cb(void* user_data, intptr_t baton) {
+  FlEngine* self = FL_ENGINE(user_data);
+  auto current_time =
+      std::chrono::nanoseconds(self->embedder_api.GetCurrentTime());
+
+  // this function returns a member value of FlDisplayMonitor that I added and which
+  // gets updated by the fl_display_monitor_calculate_frame_interval function
+  // described in the paragraph below
+  auto frame_interval = std::chrono::nanoseconds(
+      fl_display_monitor_calculate_frame_interval(self->display_monitor));
+  // To force a specific interval: auto frame_interval = std::chrono::nanoseconds(1000000);
+  auto next = SnapToNextTick(current_time, std::chrono::nanoseconds::zero(),
+                             frame_interval);
+  self->embedder_api.OnVsync(self->engine, baton, next.count(),
+                             (next + frame_interval).count());
+}
+
 gboolean fl_engine_start(FlEngine* self, GError** error) {
   g_return_val_if_fail(FL_IS_ENGINE(self), FALSE);
 
@@ -816,6 +846,7 @@ gboolean fl_engine_start(FlEngine* self, GError** error) {
       compositor_collect_backing_store_callback;
   compositor.present_view_callback = compositor_present_view_callback;
   args.compositor = &compositor;
+  args.vsync_callback = fl_engine_vsync_cb;
 
   if (self->embedder_api.RunsAOTCompiledDartCode()) {
     FlutterEngineAOTDataSource source = {};

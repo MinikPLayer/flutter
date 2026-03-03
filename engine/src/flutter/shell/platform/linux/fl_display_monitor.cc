@@ -23,6 +23,26 @@ struct _FlDisplayMonitor {
 
 G_DEFINE_TYPE(FlDisplayMonitor, fl_display_monitor, G_TYPE_OBJECT)
 
+
+const uint64_t kDefaultFrameInterval60Fps = 16600000;
+uint64_t fl_display_monitor_calculate_frame_interval(FlDisplayMonitor* self) {
+  uint64_t interval = kDefaultFrameInterval60Fps;  // 60fps, it's 16600000
+  auto display = self->display;
+
+  for(int i = 0; i < gdk_display_get_n_monitors(display); i++) {
+    auto monitor = gdk_display_get_monitor(display, i);
+    auto refresh_rate = gdk_monitor_get_refresh_rate(monitor);
+    if(refresh_rate <= 0) {
+      continue;
+    }
+
+    interval = MIN(interval, (uint64_t)(1000000000000.0 / refresh_rate));
+//    g_print("selected interval: %lu, refresh_rate: %d, monitor: %d\n", interval, refresh_rate, i);
+  }
+
+  return interval;
+}
+
 // Send the current monitor state to the engine.
 static void notify_display_update(FlDisplayMonitor* self) {
   g_autoptr(FlEngine) engine = FL_ENGINE(g_weak_ref_get(&self->engine));
