@@ -35,7 +35,8 @@ static const char* fragment_shader_src =
     "varying vec2 texcoord;\n"
     "\n"
     "void main() {\n"
-    "  gl_FragColor = texture2D(texture, texcoord);\n"
+    "  vec4 color = texture2D(texture, texcoord);\n"
+    "  gl_FragColor = vec4(color.b, color.g, color.r, color.a);\n"
     "}\n";
 
 struct _FlCompositorOpenGL {
@@ -192,10 +193,12 @@ static void composite_layer(FlCompositorOpenGL* self,
                             int height) {
   size_t texture_width = fl_framebuffer_get_width(framebuffer);
   size_t texture_height = fl_framebuffer_get_height(framebuffer);
-  glUniform2f(self->offset_location, (2 * x / width) - 1.0,
-              (2 * y / width) - 1.0);
-  glUniform2f(self->scale_location, texture_width / width,
-              texture_height / height);
+  glUniform2f(self->offset_location,
+              (2.0 * x + texture_width) / width - 1.0,
+              (2.0 * y + texture_height) / height - 1.0);
+  glUniform2f(self->scale_location,
+              (double)texture_width / width,
+              (double)texture_height / height);
 
   GLuint texture_id = fl_framebuffer_get_texture_id(framebuffer);
   glBindTexture(GL_TEXTURE_2D, texture_id);
@@ -215,9 +218,6 @@ static gboolean fl_compositor_opengl_present_layers(FlCompositor* compositor,
   }
 
   GLint general_format = GL_RGBA;
-  if (epoxy_has_gl_extension("GL_EXT_texture_format_BGRA8888")) {
-    general_format = GL_BGRA_EXT;
-  }
 
   // Save bindings that are set by this function.  All bindings must be restored
   // to their original values because Skia expects that its bindings have not
@@ -244,6 +244,8 @@ static gboolean fl_compositor_opengl_present_layers(FlCompositor* compositor,
   glGetIntegerv(GL_BLEND_DST_RGB, &saved_dst_rgb);
   GLint saved_dst_alpha;
   glGetIntegerv(GL_BLEND_DST_ALPHA, &saved_dst_alpha);
+  GLint saved_viewport[4];
+  glGetIntegerv(GL_VIEWPORT, saved_viewport);
 
   // Update framebuffer to write into.
   size_t width = layers[0]->size.width;
@@ -292,6 +294,7 @@ static gboolean fl_compositor_opengl_present_layers(FlCompositor* compositor,
 
   glBindFramebuffer(GL_DRAW_FRAMEBUFFER,
                     fl_framebuffer_get_id(self->framebuffer));
+  glViewport(0, 0, width, height);
   gboolean first_layer = TRUE;
   for (size_t i = 0; i < layers_count; ++i) {
     const FlutterLayer* layer = layers[i];
@@ -302,14 +305,12 @@ static gboolean fl_compositor_opengl_present_layers(FlCompositor* compositor,
             FL_FRAMEBUFFER(backing_store->open_gl.framebuffer.user_data);
         glBindFramebuffer(GL_READ_FRAMEBUFFER,
                           fl_framebuffer_get_id(framebuffer));
-        // The first layer can be blitted, and following layers composited with
-        // this.
+        // We always use composite_layer to allow channel swizzling via fragment shader.
         if (first_layer) {
-          glBlitFramebuffer(layer->offset.x, layer->offset.y, layer->size.width,
-                            layer->size.height, layer->offset.x,
-                            layer->offset.y, layer->size.width,
-                            layer->size.height, GL_COLOR_BUFFER_BIT,
-                            GL_NEAREST);
+          glDisable(GL_BLEND);
+          composite_layer(self, framebuffer, layer->offset.x, layer->offset.y,
+                          width, height);
+          glEnable(GL_BLEND);
           first_layer = FALSE;
         } else {
           composite_layer(self, framebuffer, layer->offset.x, layer->offset.y,
@@ -345,6 +346,8 @@ static gboolean fl_compositor_opengl_present_layers(FlCompositor* compositor,
   glUseProgram(saved_current_program);
   glBlendFuncSeparate(saved_src_rgb, saved_dst_rgb, saved_src_alpha,
                       saved_dst_alpha);
+  glViewport(saved_viewport[0], saved_viewport[1], saved_viewport[2],
+             saved_viewport[3]);
 
   if (!self->shareable) {
     glBindFramebuffer(GL_READ_FRAMEBUFFER,
@@ -382,7 +385,7 @@ static void fl_compositor_opengl_get_frame_size(FlCompositor* compositor,
 
 static gboolean fl_compositor_opengl_render(FlCompositor* compositor,
                                             cairo_t* cr,
-                                            GdkWindow* window,
+                                            GdkSurface* window,
                                             gboolean wait_for_frame) {
   FlCompositorOpenGL* self = FL_COMPOSITOR_OPENGL(compositor);
 
@@ -393,13 +396,13 @@ static gboolean fl_compositor_opengl_render(FlCompositor* compositor,
   }
 
   // If frame not ready, then wait for it.
-  gint scale_factor = gdk_window_get_scale_factor(window);
+  gint scale_factor = gdk_surface_get_scale_factor(window);
   size_t width, height;
   gint64 expiry_time =
       g_get_monotonic_time() + kCompositorRenderTimeoutMicroseconds;
   while (true) {
-    width = gdk_window_get_width(window) * scale_factor;
-    height = gdk_window_get_height(window) * scale_factor;
+    width = gdk_surface_get_width(window) * scale_factor;
+    height = gdk_surface_get_height(window) * scale_factor;
     if (!wait_for_frame) {
       break;
     }
@@ -422,10 +425,15 @@ static gboolean fl_compositor_opengl_render(FlCompositor* compositor,
     g_mutex_lock(&self->frame_mutex);
   }
 
+  cairo_save(cr);
+  cairo_translate(cr, 0, height / (double)scale_factor);
+  cairo_scale(cr, 1.0, -1.0);
+
   if (fl_framebuffer_get_shareable(self->framebuffer)) {
     g_autoptr(FlFramebuffer) sibling =
         fl_framebuffer_create_sibling(self->framebuffer);
-    gdk_cairo_draw_from_gl(cr, window, fl_framebuffer_get_texture_id(sibling),
+    GLuint texture_id = fl_framebuffer_get_texture_id(sibling);
+    gdk_cairo_draw_from_gl(cr, window, texture_id,
                            GL_TEXTURE, scale_factor, 0, 0, width, height);
   } else {
     GLint saved_texture_binding;
@@ -444,6 +452,8 @@ static gboolean fl_compositor_opengl_render(FlCompositor* compositor,
 
     glBindTexture(GL_TEXTURE_2D, saved_texture_binding);
   }
+
+  cairo_restore(cr);
 
   glFlush();
 

@@ -5,6 +5,9 @@
 #include "flutter/shell/platform/linux/fl_key_channel_responder.h"
 
 #include <gtk/gtk.h>
+#ifndef GDK_MOD2_MASK
+#define GDK_MOD2_MASK 0
+#endif
 #include <cinttypes>
 
 #include "flutter/shell/platform/linux/fl_key_event_channel.h"

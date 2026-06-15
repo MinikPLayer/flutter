@@ -32,15 +32,15 @@ static void send_announcement(int64_t view_id,
     return;
   }
 
-  FlRenderable* renderable = fl_engine_get_renderable(engine, view_id);
-  if (renderable == nullptr || !FL_IS_VIEW(renderable)) {
-    return;
-  }
+  // FlRenderable* renderable = fl_engine_get_renderable(engine, view_id);
+  // if (renderable == nullptr || !FL_IS_VIEW(renderable)) {
+  //   return;
+  // }
 
-  FlView* view = FL_VIEW(renderable);
-  FlViewAccessible* accessible = fl_view_get_accessible(view);
-  fl_view_accessible_send_announcement(
-      accessible, message, assertiveness == FL_ASSERTIVENESS_ASSERTIVE);
+  // FlView* view = FL_VIEW(renderable);
+  // FlViewAccessible* accessible = fl_view_get_accessible(view);
+  // fl_view_accessible_send_announcement(
+  //     accessible, message, assertiveness == FL_ASSERTIVENESS_ASSERTIVE);
 }
 
 static void fl_accessibility_handler_dispose(GObject* object) {

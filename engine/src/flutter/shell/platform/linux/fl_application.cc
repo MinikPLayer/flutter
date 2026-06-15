@@ -5,9 +5,7 @@
 #include "flutter/shell/platform/linux/public/flutter_linux/fl_application.h"
 
 #include <gtk/gtk.h>
-#ifdef GDK_WINDOWING_X11
-#include <gdk/gdkx.h>
-#endif
+
 
 #include "flutter/shell/platform/linux/fl_engine_private.h"
 #include "flutter/shell/platform/linux/public/flutter_linux/fl_dart_project.h"
@@ -34,7 +32,8 @@ G_DEFINE_TYPE_WITH_CODE(FlApplication,
 
 // Called when the first frame is received.
 static void first_frame_cb(FlApplication* self, FlView* view) {
-  GtkWidget* window = gtk_widget_get_toplevel(GTK_WIDGET(view));
+  GtkRoot* root = gtk_widget_get_root(GTK_WIDGET(view));
+  GtkWidget* window = GTK_WIDGET(root);
 
   // Show the main window.
   if (window != nullptr && GTK_IS_WINDOW(window)) {
@@ -52,31 +51,10 @@ static GtkWindow* fl_application_create_window(FlApplication* self,
   GtkApplicationWindow* window =
       GTK_APPLICATION_WINDOW(gtk_application_window_new(GTK_APPLICATION(self)));
 
-  // Use a header bar when running in GNOME as this is the common style used
-  // by applications and is the setup most users will be using (e.g. Ubuntu
-  // desktop).
-  // If running on X and not using GNOME then just use a traditional title bar
-  // in case the window manager does more exotic layout, e.g. tiling.
-  // If running on Wayland assume the header bar will work (may need changing
-  // if future cases occur).
-  gboolean use_header_bar = TRUE;
-#ifdef GDK_WINDOWING_X11
-  GdkScreen* screen = gtk_window_get_screen(GTK_WINDOW(window));
-  if (GDK_IS_X11_SCREEN(screen)) {
-    const gchar* wm_name = gdk_x11_screen_get_window_manager_name(screen);
-    if (g_strcmp0(wm_name, "GNOME Shell") != 0) {
-      use_header_bar = FALSE;
-    }
-  }
-#endif
-  if (use_header_bar) {
-    GtkHeaderBar* header_bar = GTK_HEADER_BAR(gtk_header_bar_new());
-    gtk_widget_show(GTK_WIDGET(header_bar));
-    gtk_header_bar_set_show_close_button(header_bar, TRUE);
-    gtk_window_set_titlebar(GTK_WINDOW(window), GTK_WIDGET(header_bar));
-  }
+  GtkHeaderBar* header_bar = GTK_HEADER_BAR(gtk_header_bar_new());
+  gtk_window_set_titlebar(GTK_WINDOW(window), GTK_WIDGET(header_bar));
 
-  gtk_container_add(GTK_CONTAINER(window), GTK_WIDGET(view));
+  gtk_window_set_child(GTK_WINDOW(window), GTK_WIDGET(view));
 
   return GTK_WINDOW(window);
 }

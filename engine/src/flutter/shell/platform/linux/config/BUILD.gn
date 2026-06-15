@@ -12,7 +12,7 @@ _pkg_configs = [
   },
   {
     name = "gtk"
-    package = "gtk+-3.0"
+    package = "gtk4"
   },
   {
     name = "egl"

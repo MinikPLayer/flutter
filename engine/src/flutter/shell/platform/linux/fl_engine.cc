@@ -8,6 +8,9 @@
 #include <gmodule.h>
 
 #include <cstring>
+#include <gtk/gtk.h>
+
+#include "flutter/shell/platform/linux/public/flutter_linux/fl_view.h"
 
 #include "flutter/common/constants.h"
 #include "flutter/shell/platform/common/engine_switches.h"
@@ -290,10 +293,6 @@ static bool create_opengl_backing_store(
 
   GLint sized_format = GL_RGBA8;
   GLint general_format = GL_RGBA;
-  if (epoxy_has_gl_extension("GL_EXT_texture_format_BGRA8888")) {
-    sized_format = GL_BGRA8_EXT;
-    general_format = GL_BGRA_EXT;
-  }
 
   FlFramebuffer* framebuffer = fl_framebuffer_new(
       general_format, config->size.width, config->size.height, FALSE);
@@ -513,6 +512,133 @@ static void fl_engine_update_semantics_cb(const FlutterSemanticsUpdate2* update,
   FlEngine* self = FL_ENGINE(user_data);
 
   g_signal_emit(self, fl_engine_signals[SIGNAL_UPDATE_SEMANTICS], 0, update);
+}
+
+typedef struct {
+  FlEngine* engine;
+  intptr_t baton;
+  guint tick_id;
+  guint timeout_id;
+  GtkWidget* widget;
+} FlEngineVsyncData;
+
+static void fl_engine_vsync_destroy_data(FlEngineVsyncData* data) {
+  if (data->widget != nullptr) {
+    g_object_remove_weak_pointer(G_OBJECT(data->widget), reinterpret_cast<gpointer*>(&data->widget));
+  }
+  g_object_unref(data->engine);
+  g_free(data);
+}
+
+static gboolean fl_engine_vsync_safety_timeout_cb(gpointer user_data);
+
+static gboolean fl_engine_on_tick_cb(GtkWidget* widget,
+                                     GdkFrameClock* frame_clock,
+                                     gpointer user_data) {
+  FlEngineVsyncData* data = static_cast<FlEngineVsyncData*>(user_data);
+  FlEngine* self = data->engine;
+  intptr_t baton = data->baton;
+
+  // Cancel the safety timeout.
+  g_source_remove(data->timeout_id);
+
+  int64_t frame_time = gdk_frame_clock_get_frame_time(frame_clock); // in microseconds
+  int64_t frame_time_nanos = frame_time * 1000;
+
+  int64_t refresh_interval = 0;
+  int64_t presentation_time = 0;
+  gdk_frame_clock_get_refresh_info(frame_clock, frame_time, &refresh_interval, &presentation_time);
+
+  int64_t interval_nanos;
+  if (refresh_interval > 0) {
+    interval_nanos = refresh_interval * 1000;
+  } else {
+    interval_nanos = 16666666; // 60Hz fallback
+  }
+
+  int64_t target_time_nanos = frame_time_nanos + interval_nanos;
+
+  self->embedder_api.OnVsync(self->engine, baton, frame_time_nanos, target_time_nanos);
+
+  fl_engine_vsync_destroy_data(data);
+  return G_SOURCE_REMOVE;
+}
+
+static gboolean fl_engine_vsync_safety_timeout_cb(gpointer user_data) {
+  FlEngineVsyncData* data = static_cast<FlEngineVsyncData*>(user_data);
+  FlEngine* self = data->engine;
+  intptr_t baton = data->baton;
+
+  // Cancel the tick callback.
+  if (data->widget != nullptr) {
+    gtk_widget_remove_tick_callback(data->widget, data->tick_id);
+  }
+
+  uint64_t current_time_nanos = self->embedder_api.GetCurrentTime();
+  uint64_t interval_nanos = 16666666; // 60Hz fallback
+
+  self->embedder_api.OnVsync(self->engine, baton, current_time_nanos, current_time_nanos + interval_nanos);
+
+  fl_engine_vsync_destroy_data(data);
+  return G_SOURCE_REMOVE;
+}
+
+static gboolean fl_engine_vsync_fallback_cb(gpointer user_data) {
+  FlEngineVsyncData* data = static_cast<FlEngineVsyncData*>(user_data);
+  FlEngine* self = data->engine;
+  intptr_t baton = data->baton;
+
+  uint64_t current_time_nanos = self->embedder_api.GetCurrentTime();
+  uint64_t interval_nanos = 16666666; // 60Hz fallback
+
+  self->embedder_api.OnVsync(self->engine, baton, current_time_nanos, current_time_nanos + interval_nanos);
+
+  g_object_unref(data->engine);
+  g_free(data);
+  return G_SOURCE_REMOVE;
+}
+
+static gboolean fl_engine_vsync_platform_thread_cb(gpointer user_data) {
+  FlEngineVsyncData* data = static_cast<FlEngineVsyncData*>(user_data);
+  FlEngine* self = data->engine;
+
+  g_autoptr(FlRenderable) renderable = get_renderable(self, flutter::kFlutterImplicitViewId);
+
+  if (renderable != nullptr && FL_IS_VIEW(renderable)) {
+    data->widget = GTK_WIDGET(renderable);
+    g_object_add_weak_pointer(G_OBJECT(data->widget), reinterpret_cast<gpointer*>(&data->widget));
+
+    data->tick_id = gtk_widget_add_tick_callback(
+        data->widget,
+        fl_engine_on_tick_cb,
+        data,
+        nullptr
+    );
+
+    data->timeout_id = g_timeout_add(
+        50, // Safety timeout of 50ms
+        fl_engine_vsync_safety_timeout_cb,
+        data
+    );
+  } else {
+    g_timeout_add(
+        16, // fallback
+        fl_engine_vsync_fallback_cb,
+        data
+    );
+  }
+
+  return G_SOURCE_REMOVE;
+}
+
+static void fl_engine_vsync_cb(void* user_data, intptr_t baton) {
+  FlEngine* self = FL_ENGINE(user_data);
+
+  FlEngineVsyncData* data = g_new0(FlEngineVsyncData, 1);
+  data->engine = FL_ENGINE(g_object_ref(self));
+  data->baton = baton;
+
+  g_main_context_invoke(nullptr, fl_engine_vsync_platform_thread_cb, data);
 }
 
 static void setup_keyboard(FlEngine* self) {
@@ -840,6 +966,7 @@ gboolean fl_engine_start(FlEngine* self, GError** error) {
   args.dart_entrypoint_argv =
       reinterpret_cast<const char* const*>(dart_entrypoint_args);
   args.engine_id = reinterpret_cast<int64_t>(self);
+  args.vsync_callback = fl_engine_vsync_cb;
 
   FlutterCompositor compositor = {};
   compositor.struct_size = sizeof(FlutterCompositor);

@@ -29,7 +29,7 @@ void fl_compositor_get_frame_size(FlCompositor* self,
 
 gboolean fl_compositor_render(FlCompositor* self,
                               cairo_t* cr,
-                              GdkWindow* window,
+                              GdkSurface* window,
                               gboolean wait_for_frame) {
   g_return_val_if_fail(FL_IS_COMPOSITOR(self), FALSE);
   return FL_COMPOSITOR_GET_CLASS(self)->render(self, cr, window,
