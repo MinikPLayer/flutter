@@ -10,6 +10,15 @@
 #include <map>
 #include <vector>
 
+// GTK4 removed GDK_MOD1_MASK and GDK_MOD2_MASK; provide fallback definitions
+// so that the auto-generated fl_key_mapping.g.cc compiles under GTK4.
+#ifndef GDK_MOD1_MASK
+#define GDK_MOD1_MASK (1 << 3)
+#endif
+#ifndef GDK_MOD2_MASK
+#define GDK_MOD2_MASK (1 << 4)
+#endif
+
 /**
  * FlKeyEmbedderCheckedKey:
  *
