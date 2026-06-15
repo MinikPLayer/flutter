@@ -3,9 +3,12 @@
 // found in the LICENSE file.
 
 #include <epoxy/egl.h>
-#include <gdk/gdkwayland.h>
+#include <gdk/gdk.h>
+#ifdef GDK_WINDOWING_WAYLAND
+#include <gdk/wayland/gdkwayland.h>
+#endif
 #ifdef GDK_WINDOWING_X11
-#include <gdk/gdkx.h>
+#include <gdk/x11/gdkx.h>
 #endif
 
 #include "flutter/shell/platform/linux/fl_opengl_manager.h"
@@ -45,16 +48,20 @@ static void fl_opengl_manager_class_init(FlOpenGLManagerClass* klass) {
 
 static void fl_opengl_manager_init(FlOpenGLManager* self) {
   GdkDisplay* display = gdk_display_get_default();
+#ifdef GDK_WINDOWING_WAYLAND
   if (GDK_IS_WAYLAND_DISPLAY(display)) {
     self->display = eglGetPlatformDisplayEXT(
         EGL_PLATFORM_WAYLAND_EXT, gdk_wayland_display_get_wl_display(display),
         NULL);
+  } else
+#endif
 #ifdef GDK_WINDOWING_X11
-  } else if (GDK_IS_X11_DISPLAY(display)) {
+  if (GDK_IS_X11_DISPLAY(display)) {
     self->display = eglGetPlatformDisplayEXT(
         EGL_PLATFORM_X11_EXT, gdk_x11_display_get_xdisplay(display), NULL);
+  } else
 #endif
-  } else {
+  {
     g_critical("Unsupported GDK backend, unable to get EGL display");
   }
 

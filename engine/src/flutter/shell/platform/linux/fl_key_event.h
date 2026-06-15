@@ -29,7 +29,8 @@ FlKeyEvent* fl_key_event_new(guint32 time,
                              guint16 keycode,
                              guint keyval,
                              GdkModifierType state,
-                             guint8 group);
+                             guint8 group,
+                             GdkEvent* origin);
 
 /**
  * fl_key_event_new_from_gdk_event:

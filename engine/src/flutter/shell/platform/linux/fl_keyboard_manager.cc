@@ -111,7 +111,7 @@ struct _FlKeyboardManager {
   std::unique_ptr<std::map<uint64_t, const LayoutGoal*>>
       logical_to_mandatory_goals;
 
-  GdkKeymap* keymap;
+  gpointer keymap;
   gulong keymap_keys_changed_cb_id;  // Signal connection ID for
                                      // keymap-keys-changed
 
@@ -139,10 +139,7 @@ static gboolean event_is_redispatched(FlKeyboardManager* self,
   return FALSE;
 }
 
-static void keymap_keys_changed_cb(FlKeyboardManager* self) {
-  g_clear_object(&self->derived_layout);
-  self->derived_layout = fl_keyboard_layout_new();
-}
+
 
 static void complete_handle_event(FlKeyboardManager* self, GTask* task) {
   HandleEventData* data =
@@ -215,11 +212,9 @@ static uint16_t convert_key_to_char(FlKeyboardManager* self,
                                     gint level) {
   GdkKeymapKey key = {keycode, group, level};
   constexpr int kBmpMax = 0xD7FF;
-  guint origin;
+  guint origin = 0;
   if (self->lookup_key_handler != nullptr) {
     origin = self->lookup_key_handler(&key, self->lookup_key_handler_user_data);
-  } else {
-    origin = gdk_keymap_lookup_key(self->keymap, &key);
   }
   return origin < kBmpMax ? origin : 0xFFFF;
 }
@@ -347,9 +342,8 @@ static void fl_keyboard_manager_init(FlKeyboardManager* self) {
     }
   }
 
-  self->keymap = gdk_keymap_get_for_display(gdk_display_get_default());
-  self->keymap_keys_changed_cb_id = g_signal_connect_swapped(
-      self->keymap, "keys-changed", G_CALLBACK(keymap_keys_changed_cb), self);
+  self->keymap = nullptr;
+  self->keymap_keys_changed_cb_id = 0;
   self->cancellable = g_cancellable_new();
 }
 

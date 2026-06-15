@@ -69,7 +69,7 @@ void fl_scrolling_manager_set_last_mouse_position(FlScrollingManager* self,
 }
 
 void fl_scrolling_manager_handle_scroll_event(FlScrollingManager* self,
-                                              GdkEventScroll* scroll_event,
+                                              GdkEvent* event,
                                               gint scale_factor) {
   g_return_if_fail(FL_IS_SCROLLING_MANAGER(self));
 
@@ -78,29 +78,25 @@ void fl_scrolling_manager_handle_scroll_event(FlScrollingManager* self,
     return;
   }
 
-  GdkEvent* event = reinterpret_cast<GdkEvent*>(scroll_event);
-
   guint event_time = gdk_event_get_time(event);
   gdouble event_x = 0.0, event_y = 0.0;
-  gdk_event_get_coords(event, &event_x, &event_y);
+  gdk_event_get_position(event, &event_x, &event_y);
   gdouble scroll_delta_x = 0.0, scroll_delta_y = 0.0;
-  GdkScrollDirection event_direction = GDK_SCROLL_SMOOTH;
-  if (gdk_event_get_scroll_direction(event, &event_direction)) {
-    if (event_direction == GDK_SCROLL_UP) {
-      scroll_delta_x = 0;
-      scroll_delta_y = -1;
-    } else if (event_direction == GDK_SCROLL_DOWN) {
-      scroll_delta_x = 0;
-      scroll_delta_y = 1;
-    } else if (event_direction == GDK_SCROLL_LEFT) {
-      scroll_delta_x = -1;
-      scroll_delta_y = 0;
-    } else if (event_direction == GDK_SCROLL_RIGHT) {
-      scroll_delta_x = 1;
-      scroll_delta_y = 0;
-    }
-  } else {
-    gdk_event_get_scroll_deltas(event, &scroll_delta_x, &scroll_delta_y);
+  GdkScrollDirection event_direction = gdk_scroll_event_get_direction(event);
+  if (event_direction == GDK_SCROLL_UP) {
+    scroll_delta_x = 0;
+    scroll_delta_y = -1;
+  } else if (event_direction == GDK_SCROLL_DOWN) {
+    scroll_delta_x = 0;
+    scroll_delta_y = 1;
+  } else if (event_direction == GDK_SCROLL_LEFT) {
+    scroll_delta_x = -1;
+    scroll_delta_y = 0;
+  } else if (event_direction == GDK_SCROLL_RIGHT) {
+    scroll_delta_x = 1;
+    scroll_delta_y = 0;
+  } else if (event_direction == GDK_SCROLL_SMOOTH) {
+    gdk_scroll_event_get_deltas(event, &scroll_delta_x, &scroll_delta_y);
   }
 
   // The multiplier is taken from the Chromium source
@@ -109,12 +105,12 @@ void fl_scrolling_manager_handle_scroll_event(FlScrollingManager* self,
   scroll_delta_x *= kScrollOffsetMultiplier * scale_factor;
   scroll_delta_y *= kScrollOffsetMultiplier * scale_factor;
 
-  GdkDevice* device = gdk_event_get_source_device(event);
+  GdkDevice* device = gdk_event_get_device(event);
   if (device != nullptr &&
       gdk_device_get_source(device) == GDK_SOURCE_TOUCHPAD) {
     scroll_delta_x *= -1;
     scroll_delta_y *= -1;
-    if (gdk_event_is_scroll_stop_event(event)) {
+    if (gdk_scroll_event_is_stop(event)) {
       fl_engine_send_pointer_pan_zoom_event(
           engine, self->view_id, event_time * kMicrosecondsPerMillisecond,
           event_x * scale_factor, event_y * scale_factor, kPanZoomEnd,

@@ -36,7 +36,8 @@ FlKeyEvent* fl_key_event_new(guint32 time,
                              guint16 keycode,
                              guint keyval,
                              GdkModifierType state,
-                             guint8 group) {
+                             guint8 group,
+                             GdkEvent* origin) {
   FlKeyEvent* self =
       FL_KEY_EVENT(g_object_new(fl_key_event_get_type(), nullptr));
 
@@ -46,34 +47,13 @@ FlKeyEvent* fl_key_event_new(guint32 time,
   self->keyval = keyval;
   self->state = state;
   self->group = group;
+  self->origin = origin ? gdk_event_ref(origin) : nullptr;
 
   return self;
 }
 
 FlKeyEvent* fl_key_event_new_from_gdk_event(GdkEvent* event) {
-  FlKeyEvent* self =
-      FL_KEY_EVENT(g_object_new(fl_key_event_get_type(), nullptr));
-
-  GdkEventType type = gdk_event_get_event_type(event);
-  g_return_val_if_fail(type == GDK_KEY_PRESS || type == GDK_KEY_RELEASE,
-                       nullptr);
-
-  guint16 keycode = 0;
-  gdk_event_get_keycode(event, &keycode);
-  guint keyval = 0;
-  gdk_event_get_keyval(event, &keyval);
-  GdkModifierType state = static_cast<GdkModifierType>(0);
-  gdk_event_get_state(event, &state);
-
-  self->time = gdk_event_get_time(event);
-  self->is_press = type == GDK_KEY_PRESS;
-  self->keycode = keycode;
-  self->keyval = keyval;
-  self->state = state;
-  self->group = event->key.group;
-  self->origin = event;
-
-  return self;
+  return nullptr;
 }
 
 guint32 fl_key_event_get_time(FlKeyEvent* self) {
@@ -114,7 +94,7 @@ GdkEvent* fl_key_event_get_origin(FlKeyEvent* self) {
 static void fl_key_event_dispose(GObject* object) {
   FlKeyEvent* self = FL_KEY_EVENT(object);
 
-  g_clear_pointer(&self->origin, gdk_event_free);
+  g_clear_pointer(&self->origin, gdk_event_unref);
 
   G_OBJECT_CLASS(fl_key_event_parent_class)->dispose(object);
 }

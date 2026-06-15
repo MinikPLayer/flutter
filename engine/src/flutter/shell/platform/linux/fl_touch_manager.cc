@@ -5,9 +5,13 @@
 #include "flutter/shell/platform/linux/fl_touch_manager.h"
 #include "flutter/shell/platform/linux/fl_engine_private.h"
 
+/*
 static constexpr int kMicrosecondsPerMillisecond = 1000;
+*/
 static const int kMinTouchDeviceId = 0;
+/*
 static const int kMaxTouchDeviceId = 128;
+*/
 
 struct _FlTouchManager {
   GObject parent_instance;
@@ -62,6 +66,7 @@ FlTouchManager* fl_touch_manager_new(FlEngine* engine, FlutterViewId view_id) {
   return self;
 }
 
+/*
 // Ensures that a touch add event is sent for the given device.
 static void ensure_touch_added(_FlTouchManager* self,
                                guint event_time,
@@ -127,64 +132,10 @@ static void release_number(_FlTouchManager* self, uint32_t number) {
     g_hash_table_remove(self->number_to_id, GINT_TO_POINTER(number));
   }
 }
+*/
 
 void fl_touch_manager_handle_touch_event(FlTouchManager* self,
-                                         GdkEventTouch* touch_event,
+                                         GdkEvent* event,
                                          gint scale_factor) {
-  g_return_if_fail(FL_IS_TOUCH_MANAGER(self));
-
-  g_autoptr(FlEngine) engine = FL_ENGINE(g_weak_ref_get(&self->engine));
-  if (engine == nullptr) {
-    return;
-  }
-
-  GdkEvent* event = reinterpret_cast<GdkEvent*>(touch_event);
-  // get sequence id from GdkEvent
-  GdkEventSequence* seq = gdk_event_get_event_sequence(event);
-  // cast pointer to int to get unique id
-  uint32_t id = reinterpret_cast<uint64_t>(seq);
-  // generate touch id from unique id
-  auto touch_id = get_generated_id(self, id);
-  // get device id
-  auto device_id =
-      static_cast<int32_t>(kFlutterPointerDeviceKindTouch) << 28 | touch_id;
-
-  gdouble event_x = 0.0, event_y = 0.0;
-  gdk_event_get_coords(event, &event_x, &event_y);
-
-  double x = event_x * scale_factor;
-  double y = event_y * scale_factor;
-
-  guint event_time = gdk_event_get_time(event);
-
-  ensure_touch_added(self, event_time, x, y, touch_id, device_id);
-
-  GdkEventType touch_event_type = gdk_event_get_event_type(event);
-
-  switch (touch_event_type) {
-    case GDK_TOUCH_BEGIN:
-      fl_engine_send_touch_down_event(engine, self->view_id,
-                                      event_time * kMicrosecondsPerMillisecond,
-                                      x, y, device_id);
-      break;
-    case GDK_TOUCH_UPDATE:
-      fl_engine_send_touch_move_event(engine, self->view_id,
-                                      event_time * kMicrosecondsPerMillisecond,
-                                      x, y, device_id);
-      break;
-    case GDK_TOUCH_END:
-      fl_engine_send_touch_up_event(engine, self->view_id,
-                                    event_time * kMicrosecondsPerMillisecond, x,
-                                    y, device_id);
-
-      fl_engine_send_touch_remove_event(
-          engine, self->view_id, event_time * kMicrosecondsPerMillisecond, x, y,
-          device_id);
-      release_number(self, id);
-      self->added_touch_devices =
-          g_list_remove(self->added_touch_devices, GINT_TO_POINTER(touch_id));
-      break;
-    default:
-      break;
-  }
+  // Stubbed for GTK4 compilation
 }

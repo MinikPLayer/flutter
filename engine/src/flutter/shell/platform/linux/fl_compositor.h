@@ -30,7 +30,7 @@ struct _FlCompositorClass {
 
   gboolean (*render)(FlCompositor* compositor,
                      cairo_t* cr,
-                     GdkWindow* window,
+                     GdkSurface* window,
                      gboolean wait_for_frame);
 };
 
@@ -80,7 +80,7 @@ void fl_compositor_get_frame_size(FlCompositor* compositor,
  */
 gboolean fl_compositor_render(FlCompositor* compositor,
                               cairo_t* cr,
-                              GdkWindow* window,
+                              GdkSurface* window,
                               gboolean wait_for_frame);
 
 G_END_DECLS

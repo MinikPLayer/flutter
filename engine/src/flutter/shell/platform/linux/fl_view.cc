@@ -4,14 +4,13 @@
 
 #include "flutter/shell/platform/linux/public/flutter_linux/fl_view.h"
 
-#include <atk/atk.h>
-#include <gdk/gdkwayland.h>
-#include <gtk/gtk-a11y.h>
+#ifdef GDK_WINDOWING_WAYLAND
+#include <gdk/wayland/gdkwayland.h>
+#endif
 
 #include <cstring>
 
 #include "flutter/common/constants.h"
-#include "flutter/shell/platform/linux/fl_accessible_node.h"
 #include "flutter/shell/platform/linux/fl_compositor_opengl.h"
 #include "flutter/shell/platform/linux/fl_compositor_software.h"
 #include "flutter/shell/platform/linux/fl_engine_private.h"
@@ -20,10 +19,9 @@
 #include "flutter/shell/platform/linux/fl_plugin_registrar_private.h"
 #include "flutter/shell/platform/linux/fl_pointer_manager.h"
 #include "flutter/shell/platform/linux/fl_scrolling_manager.h"
-#include "flutter/shell/platform/linux/fl_socket_accessible.h"
 #include "flutter/shell/platform/linux/fl_touch_manager.h"
-#include "flutter/shell/platform/linux/fl_view_accessible.h"
 #include "flutter/shell/platform/linux/fl_view_private.h"
+#include "flutter/shell/platform/linux/fl_view_accessible.h"
 #include "flutter/shell/platform/linux/fl_window_state_monitor.h"
 #include "flutter/shell/platform/linux/public/flutter_linux/fl_engine.h"
 #include "flutter/shell/platform/linux/public/flutter_linux/fl_plugin_registry.h"
@@ -33,12 +31,6 @@ struct _FlView {
 
   // Event box the render area goes inside.
   GtkWidget* event_box;
-
-  // Handle zoom gestures.
-  GtkGesture* zoom_gesture;
-
-  // Handle rotation gestures.
-  GtkGesture* rotate_gesture;
 
   // The widget rendering the Flutter view.
   GtkDrawingArea* render_area;
@@ -108,9 +100,11 @@ G_DEFINE_TYPE_WITH_CODE(
         G_IMPLEMENT_INTERFACE(fl_plugin_registry_get_type(),
                               fl_view_plugin_registry_iface_init))
 
+static gboolean handle_key_event(FlView* self, FlKeyEvent* event);
+
 // Redraw the view from the GTK thread.
 static gboolean redraw_cb(gpointer user_data) {
-  g_autoptr(FlView) self = FL_VIEW(user_data);
+  FlView* self = FL_VIEW(user_data);
 
   if (!self->have_first_frame) {
     self->have_first_frame = TRUE;
@@ -132,12 +126,11 @@ static gboolean redraw_cb(gpointer user_data) {
     gtk_widget_set_size_request(GTK_WIDGET(self->render_area),
                                 frame_width / scale_factor,
                                 frame_height / scale_factor);
-    GtkWidget* toplevel =
-        gtk_widget_get_toplevel(GTK_WIDGET(self->render_area));
-    if (GTK_IS_WINDOW(toplevel)) {
+    GtkRoot* root = gtk_widget_get_root(GTK_WIDGET(self->render_area));
+    if (GTK_IS_WINDOW(root)) {
       // Resize to smallest size, so that the window will shrink to fit the new
       // size of the render area.
-      gtk_window_resize(GTK_WINDOW(toplevel), 1, 1);
+      gtk_window_set_default_size(GTK_WINDOW(root), 1, 1);
     }
     return G_SOURCE_REMOVE;
   }
@@ -166,7 +159,10 @@ static void init_touch(FlView* self) {
 }
 
 static FlutterPointerDeviceKind get_pointer_device_kind(GdkEvent* event) {
-  GdkDevice* device = gdk_event_get_source_device(event);
+  if (event == nullptr) {
+    return kFlutterPointerDeviceKindMouse;
+  }
+  GdkDevice* device = gdk_event_get_device(event);
   if (device == nullptr) {
     return kFlutterPointerDeviceKindMouse;
   }
@@ -174,8 +170,6 @@ static FlutterPointerDeviceKind get_pointer_device_kind(GdkEvent* event) {
   GdkInputSource source = gdk_device_get_source(device);
   switch (source) {
     case GDK_SOURCE_PEN:
-    case GDK_SOURCE_ERASER:
-    case GDK_SOURCE_CURSOR:
     case GDK_SOURCE_TABLET_PAD:
       return kFlutterPointerDeviceKindStylus;
     case GDK_SOURCE_TOUCHSCREEN:
@@ -186,6 +180,7 @@ static FlutterPointerDeviceKind get_pointer_device_kind(GdkEvent* event) {
     case GDK_SOURCE_MOUSE:
       return kFlutterPointerDeviceKindMouse;
   }
+  return kFlutterPointerDeviceKindMouse;
 }
 
 // Called when the mouse cursor changes.
@@ -193,11 +188,9 @@ static void cursor_changed_cb(FlView* self) {
   FlMouseCursorHandler* handler =
       fl_engine_get_mouse_cursor_handler(self->engine);
   const gchar* cursor_name = fl_mouse_cursor_handler_get_cursor_name(handler);
-  GdkWindow* window =
-      gtk_widget_get_window(gtk_widget_get_toplevel(GTK_WIDGET(self)));
   g_autoptr(GdkCursor) cursor =
-      gdk_cursor_new_from_name(gdk_window_get_display(window), cursor_name);
-  gdk_window_set_cursor(window, cursor);
+      gdk_cursor_new_from_name(cursor_name, nullptr);
+  gtk_widget_set_cursor(GTK_WIDGET(self), cursor);
 }
 
 // Set the mouse cursor.
@@ -221,27 +214,7 @@ static void handle_geometry_changed(FlView* self) {
   gtk_widget_get_allocation(GTK_WIDGET(self), &allocation);
   gint scale_factor = gtk_widget_get_scale_factor(GTK_WIDGET(self));
 
-  // Note we can't detect if a window is moved between monitors - this
-  // information is provided by Wayland but GTK only notifies us if the scale
-  // has changed, so moving between two monitors of the same scale doesn't
-  // provide any information.
-
-  GdkWindow* window =
-      gtk_widget_get_window(gtk_widget_get_toplevel(GTK_WIDGET(self)));
-  // NOTE(robert-ancell) If we haven't got a window we default to display 0.
-  // This is probably indicating a problem with this code in that we
-  // shouldn't be generating anything until the window is created.
-  // Another event with the correct display ID is generated soon after.
-  // I haven't changed this code in case there are side-effects but we
-  // probably shouldn't call handle_geometry_changed after the view is
-  // added but only when the window is realized.
   FlutterEngineDisplayId display_id = 0;
-  if (window != nullptr) {
-    GdkMonitor* monitor = gdk_display_get_monitor_at_window(
-        gtk_widget_get_display(GTK_WIDGET(self)), window);
-    display_id = fl_display_monitor_get_display_id(
-        fl_engine_get_display_monitor(self->engine), monitor);
-  }
   size_t width = allocation.width, height = allocation.height;
   size_t min_width = width, min_height = height;
   size_t max_width = width, max_height = height;
@@ -266,16 +239,13 @@ static void view_added_cb(GObject* object,
   }
 }
 
+/*
 // Called when the engine updates accessibility.
 static void update_semantics_cb(FlView* self,
                                 const FlutterSemanticsUpdate2* update) {
-  // A semantics update is routed to a particular view.
-  if (update->view_id != self->view_id) {
-    return;
-  }
-
-  fl_view_accessible_handle_update_semantics(self->view_accessible, update);
+  // No-op for GTK4 PoC
 }
+*/
 
 // Invoked by the engine right before the engine is restarted.
 //
@@ -296,7 +266,7 @@ static void fl_view_present_layers(FlRenderable* renderable,
   fl_compositor_present_layers(self->compositor, layers, layers_count);
 
   // Perform the redraw in the GTK thead.
-  g_idle_add(redraw_cb, g_object_ref(self));
+  g_idle_add(redraw_cb, self);
 }
 
 // Implements FlPluginRegistry::get_registrar_for_plugin.
@@ -320,9 +290,11 @@ static void fl_view_plugin_registry_iface_init(
 }
 
 static void sync_modifier_if_needed(FlView* self, GdkEvent* event) {
+  if (event == nullptr) {
+    return;
+  }
   guint event_time = gdk_event_get_time(event);
-  GdkModifierType event_state = static_cast<GdkModifierType>(0);
-  gdk_event_get_state(event, &event_state);
+  GdkModifierType event_state = gdk_event_get_modifier_state(event);
   fl_keyboard_manager_sync_modifier_if_needed(
       fl_engine_get_keyboard_manager(self->engine), event_state, event_time);
 }
@@ -333,120 +305,126 @@ static void set_scrolling_position(FlView* self, gdouble x, gdouble y) {
       self->scrolling_manager, x * scale_factor, y * scale_factor);
 }
 
-// Signal handler for GtkWidget::button-press-event
-static gboolean button_press_event_cb(FlView* self,
-                                      GdkEventButton* button_event) {
-  GdkEvent* event = reinterpret_cast<GdkEvent*>(button_event);
-
-  // Flutter doesn't handle double and triple click events.
-  GdkEventType event_type = gdk_event_get_event_type(event);
-  if (event_type == GDK_DOUBLE_BUTTON_PRESS ||
-      event_type == GDK_TRIPLE_BUTTON_PRESS) {
-    return FALSE;
-  }
-
-  guint button = 0;
-  gdk_event_get_button(event, &button);
-
-  gdouble x = 0.0, y = 0.0;
-  gdk_event_get_coords(event, &x, &y);
+static void button_pressed_cb(GtkGestureClick* gesture,
+                              gint n_press,
+                              gdouble x,
+                              gdouble y,
+                              gpointer user_data) {
+  FlView* self = FL_VIEW(user_data);
+  GdkEvent* event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(gesture));
+  guint button = gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture));
+  guint32 event_time = gdk_event_get_time(event);
 
   set_scrolling_position(self, x, y);
   sync_modifier_if_needed(self, event);
 
   gint scale_factor = gtk_widget_get_scale_factor(GTK_WIDGET(self));
-  return fl_pointer_manager_handle_button_press(
-      self->pointer_manager, gdk_event_get_time(event),
+  fl_pointer_manager_handle_button_press(
+      self->pointer_manager, event_time,
       get_pointer_device_kind(event), x * scale_factor, y * scale_factor,
       button);
 }
 
-// Signal handler for GtkWidget::button-release-event
-static gboolean button_release_event_cb(FlView* self,
-                                        GdkEventButton* button_event) {
-  GdkEvent* event = reinterpret_cast<GdkEvent*>(button_event);
-
-  guint button = 0;
-  gdk_event_get_button(event, &button);
-
-  gdouble x = 0.0, y = 0.0;
-  gdk_event_get_coords(event, &x, &y);
+static void button_released_cb(GtkGestureClick* gesture,
+                               gint n_press,
+                               gdouble x,
+                               gdouble y,
+                               gpointer user_data) {
+  FlView* self = FL_VIEW(user_data);
+  GdkEvent* event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(gesture));
+  guint button = gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture));
+  guint32 event_time = gdk_event_get_time(event);
 
   set_scrolling_position(self, x, y);
   sync_modifier_if_needed(self, event);
 
   gint scale_factor = gtk_widget_get_scale_factor(GTK_WIDGET(self));
-  return fl_pointer_manager_handle_button_release(
-      self->pointer_manager, gdk_event_get_time(event),
+  fl_pointer_manager_handle_button_release(
+      self->pointer_manager, event_time,
       get_pointer_device_kind(event), x * scale_factor, y * scale_factor,
       button);
 }
 
-// Signal handler for GtkWidget::scroll-event
-static gboolean scroll_event_cb(FlView* self, GdkEventScroll* event) {
-  // TODO(robert-ancell): Update to use GtkEventControllerScroll when we can
-  // depend on GTK 3.24.
-
+static gboolean scroll_cb(GtkEventControllerScroll* controller,
+                          gdouble dx,
+                          gdouble dy,
+                          gpointer user_data) {
+  FlView* self = FL_VIEW(user_data);
+  GdkEvent* event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(controller));
   fl_scrolling_manager_handle_scroll_event(
       self->scrolling_manager, event,
       gtk_widget_get_scale_factor(GTK_WIDGET(self)));
   return TRUE;
 }
 
-static gboolean touch_event_cb(FlView* self, GdkEventTouch* event) {
-  fl_touch_manager_handle_touch_event(
-      self->touch_manager, event,
-      gtk_widget_get_scale_factor(GTK_WIDGET(self)));
-  return TRUE;
-}
-
-// Signal handler for GtkWidget::motion-notify-event
-static gboolean motion_notify_event_cb(FlView* self,
-                                       GdkEventMotion* motion_event) {
-  GdkEvent* event = reinterpret_cast<GdkEvent*>(motion_event);
+static void motion_cb(GtkEventControllerMotion* controller,
+                      gdouble x,
+                      gdouble y,
+                      gpointer user_data) {
+  FlView* self = FL_VIEW(user_data);
+  GdkEvent* event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(controller));
   sync_modifier_if_needed(self, event);
 
-  // return if touch event
-  auto event_type = gdk_event_get_event_type(event);
-  if (event_type == GDK_TOUCH_BEGIN || event_type == GDK_TOUCH_UPDATE ||
-      event_type == GDK_TOUCH_END || event_type == GDK_TOUCH_CANCEL) {
-    return FALSE;
-  }
-
-  gdouble x = 0.0, y = 0.0;
-  gdk_event_get_coords(event, &x, &y);
   gint scale_factor = gtk_widget_get_scale_factor(GTK_WIDGET(self));
-  return fl_pointer_manager_handle_motion(
+  fl_pointer_manager_handle_motion(
       self->pointer_manager, gdk_event_get_time(event),
       get_pointer_device_kind(event), x * scale_factor, y * scale_factor);
 }
 
-// Signal handler for GtkWidget::enter-notify-event
-static gboolean enter_notify_event_cb(FlView* self,
-                                      GdkEventCrossing* crossing_event) {
-  GdkEvent* event = reinterpret_cast<GdkEvent*>(crossing_event);
-  gdouble x = 0.0, y = 0.0;
-  gdk_event_get_coords(event, &x, &y);
+static void enter_cb(GtkEventControllerMotion* controller,
+                     gdouble x,
+                     gdouble y,
+                     gpointer user_data) {
+  FlView* self = FL_VIEW(user_data);
+  GdkEvent* event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(controller));
   gint scale_factor = gtk_widget_get_scale_factor(GTK_WIDGET(self));
-  return fl_pointer_manager_handle_enter(
+  fl_pointer_manager_handle_enter(
       self->pointer_manager, gdk_event_get_time(event),
       get_pointer_device_kind(event), x * scale_factor, y * scale_factor);
 }
 
-// Signal handler for GtkWidget::leave-notify-event
-static gboolean leave_notify_event_cb(FlView* self,
-                                      GdkEventCrossing* crossing_event) {
-  if (crossing_event->mode != GDK_CROSSING_NORMAL) {
-    return FALSE;
-  }
-
-  GdkEvent* event = reinterpret_cast<GdkEvent*>(crossing_event);
+static void leave_cb(GtkEventControllerMotion* controller,
+                     gpointer user_data) {
+  FlView* self = FL_VIEW(user_data);
+  GdkEvent* event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(controller));
   gdouble x = 0.0, y = 0.0;
-  gdk_event_get_coords(event, &x, &y);
   gint scale_factor = gtk_widget_get_scale_factor(GTK_WIDGET(self));
-  return fl_pointer_manager_handle_leave(
+  fl_pointer_manager_handle_leave(
       self->pointer_manager, gdk_event_get_time(event),
       get_pointer_device_kind(event), x * scale_factor, y * scale_factor);
+}
+
+static void focus_enter_cb(GtkEventControllerFocus* controller,
+                           gpointer user_data) {
+  FlView* self = FL_VIEW(user_data);
+  fl_text_input_handler_set_widget(
+      fl_engine_get_text_input_handler(self->engine), GTK_WIDGET(self));
+}
+
+static gboolean key_pressed_cb(GtkEventControllerKey* controller,
+                               guint keyval,
+                               guint keycode,
+                               GdkModifierType state,
+                               gpointer user_data) {
+  FlView* self = FL_VIEW(user_data);
+  GdkEvent* event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(controller));
+  guint32 event_time = gdk_event_get_time(event);
+  guint8 group = gdk_key_event_get_layout(event);
+  g_autoptr(FlKeyEvent) fl_event = fl_key_event_new(event_time, TRUE, keycode, keyval, state, group, event);
+  return handle_key_event(self, fl_event);
+}
+
+static gboolean key_released_cb(GtkEventControllerKey* controller,
+                                guint keyval,
+                                guint keycode,
+                                GdkModifierType state,
+                                gpointer user_data) {
+  FlView* self = FL_VIEW(user_data);
+  GdkEvent* event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(controller));
+  guint32 event_time = gdk_event_get_time(event);
+  guint8 group = gdk_key_event_get_layout(event);
+  g_autoptr(FlKeyEvent) fl_event = fl_key_event_new(event_time, FALSE, keycode, keyval, state, group, event);
+  return handle_key_event(self, fl_event);
 }
 
 static void gesture_rotation_begin_cb(FlView* self) {
@@ -454,8 +432,7 @@ static void gesture_rotation_begin_cb(FlView* self) {
 }
 
 static void gesture_rotation_update_cb(FlView* self,
-                                       gdouble rotation,
-                                       gdouble delta) {
+                                       gdouble rotation) {
   fl_scrolling_manager_handle_rotation_update(self->scrolling_manager,
                                               rotation);
 }
@@ -479,8 +456,9 @@ static void gesture_zoom_end_cb(FlView* self) {
 static void setup_opengl(FlView* self) {
   g_autoptr(GError) error = nullptr;
 
-  self->render_context = gdk_window_create_gl_context(
-      gtk_widget_get_window(GTK_WIDGET(self->render_area)), &error);
+  GtkNative* native = gtk_widget_get_native(GTK_WIDGET(self->render_area));
+  GdkSurface* surface = gtk_native_get_surface(native);
+  self->render_context = gdk_surface_create_gl_context(surface, &error);
   if (self->render_context == nullptr) {
     g_warning("Failed to create OpenGL context: %s", error->message);
     return;
@@ -494,8 +472,10 @@ static void setup_opengl(FlView* self) {
   // If using Wayland, then EGL is in use and we can access the frame
   // from the Flutter context using EGLImage. If not (i.e. X11 using GLX)
   // then we have to copy the texture via the CPU.
-  gboolean shareable =
-      GDK_IS_WAYLAND_DISPLAY(gtk_widget_get_display(GTK_WIDGET(self)));
+  gboolean shareable = FALSE;
+#ifdef GDK_WINDOWING_WAYLAND
+  shareable = GDK_IS_WAYLAND_DISPLAY(gtk_widget_get_display(GTK_WIDGET(self)));
+#endif
   self->compositor = FL_COMPOSITOR(fl_compositor_opengl_new(
       fl_engine_get_task_runner(self->engine),
       fl_engine_get_opengl_manager(self->engine), shareable));
@@ -523,14 +503,14 @@ static void realize_cb(FlView* self) {
     return;
   }
 
-  GtkWidget* toplevel_window = gtk_widget_get_toplevel(GTK_WIDGET(self));
+  GtkWidget* toplevel_window = GTK_WIDGET(gtk_widget_get_root(GTK_WIDGET(self)));
 
   self->window_state_monitor =
       fl_window_state_monitor_new(fl_engine_get_binary_messenger(self->engine),
                                   GTK_WINDOW(toplevel_window));
 
   // Handle requests by the user to close the application.
-  g_signal_connect_swapped(toplevel_window, "delete-event",
+  g_signal_connect_swapped(toplevel_window, "close-request",
                            G_CALLBACK(window_delete_event_cb), self);
 
   // Flutter engine will need to make the context current from raster thread
@@ -548,7 +528,7 @@ static void realize_cb(FlView* self) {
   handle_geometry_changed(self);
 }
 
-static void size_allocate_cb(FlView* self) {
+static void size_allocate_cb(FlView* self, int width, int height) {
   handle_geometry_changed(self);
 }
 
@@ -564,7 +544,12 @@ static void paint_background(FlView* self, cairo_t* cr) {
   cairo_paint(cr);
 }
 
-static gboolean draw_cb(FlView* self, cairo_t* cr) {
+static void draw_cb(GtkDrawingArea* drawing_area,
+                    cairo_t* cr,
+                    int width,
+                    int height,
+                    gpointer user_data) {
+  FlView* self = FL_VIEW(user_data);
   paint_background(self, cr);
 
   if (self->render_context) {
@@ -572,15 +557,13 @@ static gboolean draw_cb(FlView* self, cairo_t* cr) {
   }
 
   gboolean wait_for_frame = !self->sized_to_content;
-  gboolean result = fl_compositor_render(
-      self->compositor, cr,
-      gtk_widget_get_window(GTK_WIDGET(self->render_area)), wait_for_frame);
+  GtkNative* native = gtk_widget_get_native(GTK_WIDGET(self->render_area));
+  GdkSurface* surface = gtk_native_get_surface(native);
+  fl_compositor_render(self->compositor, cr, surface, wait_for_frame);
 
   if (self->render_context) {
     gdk_gl_context_clear_current();
   }
-
-  return result;
 }
 
 static void fl_view_notify(GObject* object, GParamSpec* pspec) {
@@ -600,8 +583,6 @@ static void fl_view_dispose(GObject* object) {
 
   g_cancellable_cancel(self->cancellable);
 
-  g_clear_object(&self->zoom_gesture);
-  g_clear_object(&self->rotate_gesture);
   if (self->engine != nullptr) {
     FlMouseCursorHandler* handler =
         fl_engine_get_mouse_cursor_handler(self->engine);
@@ -650,12 +631,9 @@ static void fl_view_realize(GtkWidget* widget) {
   gtk_widget_realize(GTK_WIDGET(self->render_area));
 }
 
-static gboolean handle_key_event(FlView* self, GdkEventKey* key_event) {
-  g_autoptr(FlKeyEvent) event = fl_key_event_new_from_gdk_event(
-      gdk_event_copy(reinterpret_cast<GdkEvent*>(key_event)));
-
+static gboolean handle_key_event(FlView* self, FlKeyEvent* event) {
   fl_keyboard_manager_handle_event(
-      fl_engine_get_keyboard_manager(self->engine), event, self->cancellable,
+      fl_engine_get_keyboard_manager(self->engine), FL_KEY_EVENT(g_object_ref(event)), self->cancellable,
       [](GObject* object, GAsyncResult* result, gpointer user_data) {
         FlView* self = FL_VIEW(user_data);
 
@@ -677,36 +655,12 @@ static gboolean handle_key_event(FlView* self, GdkEventKey* key_event) {
                   redispatch_event)) {
             fl_keyboard_manager_add_redispatched_event(
                 fl_engine_get_keyboard_manager(self->engine), redispatch_event);
-            gdk_event_put(fl_key_event_get_origin(redispatch_event));
           }
         }
       },
       self);
 
   return TRUE;
-}
-
-// Implements GtkWidget::key_press_event.
-static gboolean fl_view_focus_in_event(GtkWidget* widget,
-                                       GdkEventFocus* event) {
-  FlView* self = FL_VIEW(widget);
-  fl_text_input_handler_set_widget(
-      fl_engine_get_text_input_handler(self->engine), widget);
-  return FALSE;
-}
-
-// Implements GtkWidget::key_press_event.
-static gboolean fl_view_key_press_event(GtkWidget* widget,
-                                        GdkEventKey* key_event) {
-  FlView* self = FL_VIEW(widget);
-  return handle_key_event(self, key_event);
-}
-
-// Implements GtkWidget::key_release_event.
-static gboolean fl_view_key_release_event(GtkWidget* widget,
-                                          GdkEventKey* key_event) {
-  FlView* self = FL_VIEW(widget);
-  return handle_key_event(self, key_event);
 }
 
 static void fl_view_class_init(FlViewClass* klass) {
@@ -716,24 +670,15 @@ static void fl_view_class_init(FlViewClass* klass) {
 
   GtkWidgetClass* widget_class = GTK_WIDGET_CLASS(klass);
   widget_class->realize = fl_view_realize;
-  widget_class->focus_in_event = fl_view_focus_in_event;
-  widget_class->key_press_event = fl_view_key_press_event;
-  widget_class->key_release_event = fl_view_key_release_event;
 
   fl_view_signals[SIGNAL_FIRST_FRAME] =
       g_signal_new("first-frame", fl_view_get_type(), G_SIGNAL_RUN_LAST, 0,
                    NULL, NULL, NULL, G_TYPE_NONE, 0);
-
-  gtk_widget_class_set_accessible_type(GTK_WIDGET_CLASS(klass),
-                                       fl_socket_accessible_get_type());
 }
 
 // Engine related construction.
 static void setup_engine(FlView* self) {
-  self->view_accessible = fl_view_accessible_new(self->engine, self->view_id);
-  fl_socket_accessible_embed(
-      FL_SOCKET_ACCESSIBLE(gtk_widget_get_accessible(GTK_WIDGET(self))),
-      atk_plug_get_id(ATK_PLUG(self->view_accessible)));
+  self->view_accessible = nullptr;
 
   self->pointer_manager = fl_pointer_manager_new(self->view_id, self->engine);
 
@@ -743,8 +688,6 @@ static void setup_engine(FlView* self) {
   self->on_pre_engine_restart_cb_id =
       g_signal_connect_swapped(self->engine, "on-pre-engine-restart",
                                G_CALLBACK(on_pre_engine_restart_cb), self);
-  self->update_semantics_cb_id = g_signal_connect_swapped(
-      self->engine, "update-semantics", G_CALLBACK(update_semantics_cb), self);
 }
 
 static void fl_view_init(FlView* self) {
@@ -758,55 +701,55 @@ static void fl_view_init(FlView* self) {
       .red = 0.0, .green = 0.0, .blue = 0.0, .alpha = 1.0};
   self->background_color = gdk_rgba_copy(&default_background);
 
-  self->event_box = gtk_event_box_new();
-  gtk_widget_set_hexpand(self->event_box, TRUE);
-  gtk_widget_set_vexpand(self->event_box, TRUE);
-  gtk_container_add(GTK_CONTAINER(self), self->event_box);
-  gtk_widget_show(self->event_box);
-  gtk_widget_add_events(self->event_box,
-                        GDK_POINTER_MOTION_MASK | GDK_BUTTON_PRESS_MASK |
-                            GDK_BUTTON_RELEASE_MASK | GDK_SCROLL_MASK |
-                            GDK_SMOOTH_SCROLL_MASK | GDK_TOUCH_MASK);
-
-  g_signal_connect_swapped(self->event_box, "button-press-event",
-                           G_CALLBACK(button_press_event_cb), self);
-  g_signal_connect_swapped(self->event_box, "button-release-event",
-                           G_CALLBACK(button_release_event_cb), self);
-  g_signal_connect_swapped(self->event_box, "scroll-event",
-                           G_CALLBACK(scroll_event_cb), self);
-  g_signal_connect_swapped(self->event_box, "motion-notify-event",
-                           G_CALLBACK(motion_notify_event_cb), self);
-  g_signal_connect_swapped(self->event_box, "enter-notify-event",
-                           G_CALLBACK(enter_notify_event_cb), self);
-  g_signal_connect_swapped(self->event_box, "leave-notify-event",
-                           G_CALLBACK(leave_notify_event_cb), self);
-  self->zoom_gesture = gtk_gesture_zoom_new(self->event_box);
-  g_signal_connect_swapped(self->zoom_gesture, "begin",
-                           G_CALLBACK(gesture_zoom_begin_cb), self);
-  g_signal_connect_swapped(self->zoom_gesture, "scale-changed",
-                           G_CALLBACK(gesture_zoom_update_cb), self);
-  g_signal_connect_swapped(self->zoom_gesture, "end",
-                           G_CALLBACK(gesture_zoom_end_cb), self);
-  self->rotate_gesture = gtk_gesture_rotate_new(self->event_box);
-  g_signal_connect_swapped(self->rotate_gesture, "begin",
-                           G_CALLBACK(gesture_rotation_begin_cb), self);
-  g_signal_connect_swapped(self->rotate_gesture, "angle-changed",
-                           G_CALLBACK(gesture_rotation_update_cb), self);
-  g_signal_connect_swapped(self->rotate_gesture, "end",
-                           G_CALLBACK(gesture_rotation_end_cb), self);
-  g_signal_connect_swapped(self->event_box, "touch-event",
-                           G_CALLBACK(touch_event_cb), self);
-
   self->render_area = GTK_DRAWING_AREA(gtk_drawing_area_new());
-  gtk_widget_show(GTK_WIDGET(self->render_area));
-  gtk_container_add(GTK_CONTAINER(self->event_box),
-                    GTK_WIDGET(self->render_area));
+  gtk_widget_set_hexpand(GTK_WIDGET(self->render_area), TRUE);
+  gtk_widget_set_vexpand(GTK_WIDGET(self->render_area), TRUE);
+  gtk_box_append(GTK_BOX(self), GTK_WIDGET(self->render_area));
+
   g_signal_connect_swapped(self->render_area, "realize", G_CALLBACK(realize_cb),
                            self);
-  g_signal_connect_swapped(self->render_area, "size-allocate",
+  g_signal_connect_swapped(self->render_area, "resize",
                            G_CALLBACK(size_allocate_cb), self);
-  g_signal_connect_swapped(self->render_area, "draw", G_CALLBACK(draw_cb),
-                           self);
+  gtk_drawing_area_set_draw_func(self->render_area, draw_cb, self, nullptr);
+
+  // Set up event controllers
+  GtkGesture* click = gtk_gesture_click_new();
+  gtk_widget_add_controller(GTK_WIDGET(self->render_area), GTK_EVENT_CONTROLLER(click));
+  g_signal_connect(click, "pressed", G_CALLBACK(button_pressed_cb), self);
+  g_signal_connect(click, "released", G_CALLBACK(button_released_cb), self);
+
+  GtkEventController* motion = gtk_event_controller_motion_new();
+  gtk_widget_add_controller(GTK_WIDGET(self->render_area), motion);
+  g_signal_connect(motion, "motion", G_CALLBACK(motion_cb), self);
+  g_signal_connect(motion, "enter", G_CALLBACK(enter_cb), self);
+  g_signal_connect(motion, "leave", G_CALLBACK(leave_cb), self);
+
+  GtkEventController* scroll = gtk_event_controller_scroll_new(
+      static_cast<GtkEventControllerScrollFlags>(
+          GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES | GTK_EVENT_CONTROLLER_SCROLL_DISCRETE));
+  gtk_widget_add_controller(GTK_WIDGET(self->render_area), scroll);
+  g_signal_connect(scroll, "scroll", G_CALLBACK(scroll_cb), self);
+
+  GtkEventController* focus = gtk_event_controller_focus_new();
+  gtk_widget_add_controller(GTK_WIDGET(self), focus);
+  g_signal_connect(focus, "enter", G_CALLBACK(focus_enter_cb), self);
+
+  GtkEventController* key = gtk_event_controller_key_new();
+  gtk_widget_add_controller(GTK_WIDGET(self), key);
+  g_signal_connect(key, "key-pressed", G_CALLBACK(key_pressed_cb), self);
+  g_signal_connect(key, "key-released", G_CALLBACK(key_released_cb), self);
+
+  GtkGesture* zoom = gtk_gesture_zoom_new();
+  gtk_widget_add_controller(GTK_WIDGET(self->render_area), GTK_EVENT_CONTROLLER(zoom));
+  g_signal_connect_swapped(zoom, "begin", G_CALLBACK(gesture_zoom_begin_cb), self);
+  g_signal_connect_swapped(zoom, "scale-changed", G_CALLBACK(gesture_zoom_update_cb), self);
+  g_signal_connect_swapped(zoom, "end", G_CALLBACK(gesture_zoom_end_cb), self);
+
+  GtkGesture* rotate = gtk_gesture_rotate_new();
+  gtk_widget_add_controller(GTK_WIDGET(self->render_area), GTK_EVENT_CONTROLLER(rotate));
+  g_signal_connect_swapped(rotate, "begin", G_CALLBACK(gesture_rotation_begin_cb), self);
+  g_signal_connect_swapped(rotate, "angle-changed", G_CALLBACK(gesture_rotation_update_cb), self);
+  g_signal_connect_swapped(rotate, "end", G_CALLBACK(gesture_rotation_end_cb), self);
 }
 
 G_MODULE_EXPORT FlView* fl_view_new(FlDartProject* project) {

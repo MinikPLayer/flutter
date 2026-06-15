@@ -21,27 +21,20 @@ struct _FlWindowMonitor {
   void (*on_state_changed)(void);
   void (*on_is_active_notify)(void);
   void (*on_title_notify)(void);
-  void (*on_moved_to_rect)(int, int, int, int);
   void (*on_close)(void);
   void (*on_destroy)(void);
 };
 
 G_DEFINE_TYPE(FlWindowMonitor, fl_window_monitor, G_TYPE_OBJECT)
 
-static gboolean configure_event_cb(FlWindowMonitor* self,
-                                   GdkEventConfigure* event) {
+static void property_notify_cb(FlWindowMonitor* self) {
   flutter::IsolateScope scope(self->isolate);
   self->on_configure();
-
-  return FALSE;
 }
 
-static gboolean window_state_event_cb(FlWindowMonitor* self,
-                                      GdkEventWindowState* event) {
+static void state_notify_cb(FlWindowMonitor* self) {
   flutter::IsolateScope scope(self->isolate);
   self->on_state_changed();
-
-  return FALSE;
 }
 
 static void is_active_notify_cb(FlWindowMonitor* self) {
@@ -54,17 +47,7 @@ static void title_notify_cb(FlWindowMonitor* self) {
   self->on_title_notify();
 }
 
-static void moved_to_rect_cb(FlWindowMonitor* self,
-                             GdkRectangle* flipped_rect,
-                             GdkRectangle* final_rect,
-                             gboolean flipped_x,
-                             gboolean flipped_y) {
-  flutter::IsolateScope scope(self->isolate);
-  self->on_moved_to_rect(final_rect->x, final_rect->y, final_rect->width,
-                         final_rect->height);
-}
-
-static gboolean delete_event_cb(FlWindowMonitor* self, GdkEvent* event) {
+static gboolean delete_event_cb(FlWindowMonitor* self) {
   flutter::IsolateScope scope(self->isolate);
   self->on_close();
 
@@ -100,7 +83,6 @@ G_MODULE_EXPORT FlWindowMonitor* fl_window_monitor_new(
     void (*on_state_changed)(void),
     void (*on_is_active_notify)(void),
     void (*on_title_notify)(void),
-    void (*on_moved_to_rect)(int, int, int, int),
     void (*on_close)(void),
     void (*on_destroy)(void)) {
   FlWindowMonitor* self =
@@ -112,20 +94,19 @@ G_MODULE_EXPORT FlWindowMonitor* fl_window_monitor_new(
   self->on_state_changed = on_state_changed;
   self->on_is_active_notify = on_is_active_notify;
   self->on_title_notify = on_title_notify;
-  self->on_moved_to_rect = on_moved_to_rect;
   self->on_close = on_close;
   self->on_destroy = on_destroy;
-  g_signal_connect_swapped(window, "configure-event",
-                           G_CALLBACK(configure_event_cb), self);
-  g_signal_connect_swapped(window, "window-state-event",
-                           G_CALLBACK(window_state_event_cb), self);
+  g_signal_connect_swapped(window, "notify::default-width",
+                           G_CALLBACK(property_notify_cb), self);
+  g_signal_connect_swapped(window, "notify::default-height",
+                           G_CALLBACK(property_notify_cb), self);
+  g_signal_connect_swapped(window, "notify::suspended",
+                           G_CALLBACK(state_notify_cb), self);
   g_signal_connect_swapped(window, "notify::is-active",
                            G_CALLBACK(is_active_notify_cb), self);
   g_signal_connect_swapped(window, "notify::title", G_CALLBACK(title_notify_cb),
                            self);
-  g_signal_connect_swapped(gtk_widget_get_window(GTK_WIDGET(window)),
-                           "moved-to-rect", G_CALLBACK(moved_to_rect_cb), self);
-  g_signal_connect_swapped(window, "delete-event", G_CALLBACK(delete_event_cb),
+  g_signal_connect_swapped(window, "close-request", G_CALLBACK(delete_event_cb),
                            self);
   g_signal_connect_swapped(window, "destroy", G_CALLBACK(destroy_cb), self);
 

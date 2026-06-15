@@ -347,9 +347,12 @@ static void update_im_cursor_position(FlTextInputHandler* self) {
 
   // Transform from Flutter view coordinates to GTK window coordinates.
   GdkRectangle preedit_rect = {};
+  double x_out = 0.0, y_out = 0.0;
   gtk_widget_translate_coordinates(self->widget,
-                                   gtk_widget_get_toplevel(self->widget), x, y,
-                                   &preedit_rect.x, &preedit_rect.y);
+                                   GTK_WIDGET(gtk_widget_get_root(self->widget)), x, y,
+                                   &x_out, &y_out);
+  preedit_rect.x = x_out;
+  preedit_rect.y = y_out;
 
   // Set the cursor location in window coordinates so that GTK can position
   // any system input method windows.
@@ -480,8 +483,7 @@ void fl_text_input_handler_set_widget(FlTextInputHandler* self,
                                       GtkWidget* widget) {
   g_return_if_fail(FL_IS_TEXT_INPUT_HANDLER(self));
   self->widget = widget;
-  gtk_im_context_set_client_window(self->im_context,
-                                   gtk_widget_get_window(self->widget));
+  gtk_im_context_set_client_widget(self->im_context, self->widget);
 }
 
 GtkWidget* fl_text_input_handler_get_widget(FlTextInputHandler* self) {
@@ -499,7 +501,7 @@ gboolean fl_text_input_handler_filter_keypress(FlTextInputHandler* self,
 
   if (gtk_im_context_filter_keypress(
           self->im_context,
-          reinterpret_cast<GdkEventKey*>(fl_key_event_get_origin(event)))) {
+          fl_key_event_get_origin(event))) {
     return TRUE;
   }
 

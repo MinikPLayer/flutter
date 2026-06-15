@@ -35,18 +35,32 @@ struct _FlPlatformHandler {
 G_DEFINE_TYPE(FlPlatformHandler, fl_platform_handler, G_TYPE_OBJECT)
 
 // Called when clipboard text received.
-static void clipboard_text_cb(GtkClipboard* clipboard,
-                              const gchar* text,
-                              gpointer user_data) {
+static void clipboard_read_text_ready_cb(GObject* source_object,
+                                         GAsyncResult* result,
+                                         gpointer user_data) {
+  GdkClipboard* clipboard = GDK_CLIPBOARD(source_object);
   g_autoptr(FlMethodCall) method_call = FL_METHOD_CALL(user_data);
+
+  g_autoptr(GError) error = nullptr;
+  g_autofree char* text = gdk_clipboard_read_text_finish(clipboard, result, &error);
+  if (error != nullptr) {
+    g_warning("Failed to read text from clipboard: %s", error->message);
+    fl_platform_channel_respond_clipboard_get_data(method_call, nullptr);
+    return;
+  }
+
   fl_platform_channel_respond_clipboard_get_data(method_call, text);
 }
 
 // Called when clipboard text received during has_strings.
-static void clipboard_text_has_strings_cb(GtkClipboard* clipboard,
-                                          const gchar* text,
-                                          gpointer user_data) {
+static void clipboard_read_text_has_strings_ready_cb(GObject* source_object,
+                                                     GAsyncResult* result,
+                                                     gpointer user_data) {
+  GdkClipboard* clipboard = GDK_CLIPBOARD(source_object);
   g_autoptr(FlMethodCall) method_call = FL_METHOD_CALL(user_data);
+
+  g_autoptr(GError) error = nullptr;
+  g_autofree char* text = gdk_clipboard_read_text_finish(clipboard, result, &error);
   fl_platform_channel_respond_clipboard_has_strings(
       method_call, text != nullptr && strlen(text) > 0);
 }
@@ -55,9 +69,9 @@ static void clipboard_text_has_strings_cb(GtkClipboard* clipboard,
 static FlMethodResponse* clipboard_set_data(FlMethodCall* method_call,
                                             const gchar* text,
                                             gpointer user_data) {
-  GtkClipboard* clipboard =
-      gtk_clipboard_get_default(gdk_display_get_default());
-  gtk_clipboard_set_text(clipboard, text, -1);
+  GdkClipboard* clipboard =
+      gdk_display_get_clipboard(gdk_display_get_default());
+  gdk_clipboard_set_text(clipboard, text);
 
   return FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
 }
@@ -66,16 +80,18 @@ static FlMethodResponse* clipboard_set_data(FlMethodCall* method_call,
 static FlMethodResponse* clipboard_get_data(FlMethodCall* method_call,
                                             const gchar* format,
                                             gpointer user_data) {
+  FlPlatformHandler* self = FL_PLATFORM_HANDLER(user_data);
   if (strcmp(format, kTextPlainFormat) != 0) {
     return FL_METHOD_RESPONSE(fl_method_error_response_new(
         kUnknownClipboardFormatError, "GTK clipboard API only supports text",
         nullptr));
   }
 
-  GtkClipboard* clipboard =
-      gtk_clipboard_get_default(gdk_display_get_default());
-  gtk_clipboard_request_text(clipboard, clipboard_text_cb,
-                             g_object_ref(method_call));
+  GdkClipboard* clipboard =
+      gdk_display_get_clipboard(gdk_display_get_default());
+  gdk_clipboard_read_text_async(clipboard, self->cancellable,
+                                clipboard_read_text_ready_cb,
+                                g_object_ref(method_call));
 
   // Will respond later.
   return nullptr;
@@ -85,10 +101,12 @@ static FlMethodResponse* clipboard_get_data(FlMethodCall* method_call,
 // be pasted, without actually accessing the clipboard content itself.
 static FlMethodResponse* clipboard_has_strings(FlMethodCall* method_call,
                                                gpointer user_data) {
-  GtkClipboard* clipboard =
-      gtk_clipboard_get_default(gdk_display_get_default());
-  gtk_clipboard_request_text(clipboard, clipboard_text_has_strings_cb,
-                             g_object_ref(method_call));
+  FlPlatformHandler* self = FL_PLATFORM_HANDLER(user_data);
+  GdkClipboard* clipboard =
+      gdk_display_get_clipboard(gdk_display_get_default());
+  gdk_clipboard_read_text_async(clipboard, self->cancellable,
+                                clipboard_read_text_has_strings_ready_cb,
+                                g_object_ref(method_call));
 
   // Will respond later.
   return nullptr;
